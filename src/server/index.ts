@@ -21,7 +21,13 @@ const app = express()
 const PORT = process.env.PORT || 3001
 
 // Middleware
-app.use(cors())
+app.use(
+  cors({
+    origin: ["http://localhost:3000", "http://localhost:3001"],
+    methods: ["GET", "POST"],
+    credentials: true
+  })
+)
 app.use(bodyParser.json())
 
 // Serve static files from the React app
@@ -47,17 +53,26 @@ const sendSSEData = (
   data: any,
   event: string = "message"
 ) => {
+  console.log(`Sending SSE event: ${event}`, data)
   res.write(`event: ${event}\n`)
   res.write(`data: ${JSON.stringify(data)}\n\n`)
+  // Ensure data is sent immediately - no need to call flush() as Express handles this
 }
 
 // API endpoint for trip planning with SSE
 app.get("/api/stream-trip-plan", (req, res) => {
+  console.log("SSE connection request received")
+
   // Set headers for SSE
-  res.setHeader("Content-Type", "text/event-stream")
-  res.setHeader("Cache-Control", "no-cache")
-  res.setHeader("Connection", "keep-alive")
-  res.flushHeaders()
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*"
+  })
+
+  // Send an initial connection established event
+  sendSSEData(res, { message: "Connection established" }, "connected")
 
   // Parse query parameters
   const destinations = ((req.query.destinations as string) || "")
@@ -69,6 +84,15 @@ app.get("/api/stream-trip-plan", (req, res) => {
   const budget = parseInt(req.query.budget as string, 10)
   const travelers = parseInt(req.query.travelers as string, 10)
 
+  console.log("SSE request parameters:", {
+    destinations,
+    startDate,
+    endDate,
+    departureCity,
+    budget,
+    travelers
+  })
+
   // Validate input
   if (
     !destinations ||
@@ -79,6 +103,7 @@ app.get("/api/stream-trip-plan", (req, res) => {
     isNaN(budget) ||
     isNaN(travelers)
   ) {
+    console.error("Invalid parameters for SSE request")
     sendSSEData(res, { error: "Missing or invalid parameters" }, "error")
     res.end()
     return
@@ -98,6 +123,11 @@ app.get("/api/stream-trip-plan", (req, res) => {
     "green",
     true
   )
+
+  // Keep the connection alive with a heartbeat
+  const heartbeatInterval = setInterval(() => {
+    sendSSEData(res, { message: "heartbeat" }, "heartbeat")
+  }, 15000) // Send heartbeat every 15 seconds
 
   // Initialize the agent and run the planning process
   const runTripPlanner = async () => {
@@ -141,7 +171,14 @@ app.get("/api/stream-trip-plan", (req, res) => {
               const thought = `🧠 Using tool ${action.tool} with input: ${action.toolInput}`
               logWithColor(thought, "yellow", true)
               agentThoughts.push(thought)
-              sendSSEData(res, { thought }, "thought")
+
+              // Send the thought as an SSE event
+              try {
+                sendSSEData(res, { thought }, "thought")
+              } catch (error) {
+                console.error("Error sending thought via SSE:", error)
+              }
+
               return undefined
             }
           }
@@ -162,18 +199,33 @@ app.get("/api/stream-trip-plan", (req, res) => {
         "complete"
       )
 
+      // Clear the heartbeat interval
+      clearInterval(heartbeatInterval)
+
       // End the SSE connection
       res.end()
+      console.log("SSE connection closed after completion")
     } catch (error: any) {
       console.error("Error planning trip:", error)
+
+      // Clear the heartbeat interval
+      clearInterval(heartbeatInterval)
+
       sendSSEData(
         res,
         { error: error.message || "An error occurred while planning the trip" },
         "error"
       )
       res.end()
+      console.log("SSE connection closed due to error")
     }
   }
+
+  // Handle client disconnect
+  req.on("close", () => {
+    console.log("Client closed SSE connection")
+    clearInterval(heartbeatInterval)
+  })
 
   // Run the trip planner
   runTripPlanner()

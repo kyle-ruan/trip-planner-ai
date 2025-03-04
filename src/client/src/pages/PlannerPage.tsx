@@ -106,8 +106,13 @@ const PlannerPage: React.FC = () => {
           travelers: travelers.toString()
         }).toString()
 
-        // Create EventSource for SSE
+        // Create EventSource for SSE - use a relative path which will be proxied correctly
         const eventSource = new EventSource(
+          `/api/stream-trip-plan?${queryParams}`
+        )
+
+        console.log(
+          "Connecting to SSE endpoint:",
           `/api/stream-trip-plan?${queryParams}`
         )
 
@@ -115,46 +120,93 @@ const PlannerPage: React.FC = () => {
         const thoughts: string[] = []
         let finalPlan: string = ""
 
+        // Add a generic message handler for debugging
+        eventSource.onmessage = (event) => {
+          console.log("SSE generic message received:", event.data)
+          try {
+            const data = JSON.parse(event.data)
+            if (data.thought) {
+              thoughts.push(data.thought)
+              setStreamingThoughts([...thoughts])
+            }
+          } catch (e) {
+            console.error("Error parsing SSE message:", e)
+          }
+        }
+
         // Handle different event types
+        eventSource.addEventListener("connected", (event: MessageEvent) => {
+          console.log("SSE connection established:", event.data)
+          setStreamingStatus("Connected to server...")
+        })
+
+        eventSource.addEventListener("heartbeat", (event: MessageEvent) => {
+          console.log("SSE heartbeat received")
+        })
+
         eventSource.addEventListener("start", (event: MessageEvent) => {
-          const data = JSON.parse(event.data)
-          setStreamingStatus(data.message || "Planning started...")
+          console.log("SSE 'start' event received:", event.data)
+          try {
+            const data = JSON.parse(event.data)
+            setStreamingStatus(data.message || "Planning started...")
+          } catch (e) {
+            console.error("Error parsing start event:", e)
+          }
         })
 
         eventSource.addEventListener("thinking", (event: MessageEvent) => {
-          const data = JSON.parse(event.data)
-          setStreamingStatus(data.message || "AI is thinking...")
+          console.log("SSE 'thinking' event received:", event.data)
+          try {
+            const data = JSON.parse(event.data)
+            setStreamingStatus(data.message || "AI is thinking...")
+          } catch (e) {
+            console.error("Error parsing thinking event:", e)
+          }
         })
 
         eventSource.addEventListener("thought", (event: MessageEvent) => {
-          const data = JSON.parse(event.data)
-          if (data.thought) {
-            thoughts.push(data.thought)
-            setStreamingThoughts([...thoughts])
+          console.log("SSE 'thought' event received:", event.data)
+          try {
+            const data = JSON.parse(event.data)
+            if (data.thought) {
+              thoughts.push(data.thought)
+              setStreamingThoughts([...thoughts])
+            }
+          } catch (e) {
+            console.error("Error parsing thought event:", e)
           }
         })
 
         eventSource.addEventListener("complete", (event: MessageEvent) => {
-          const data = JSON.parse(event.data)
-          finalPlan = data.plan
+          console.log("SSE 'complete' event received:", event.data)
+          try {
+            const data = JSON.parse(event.data)
+            finalPlan = data.plan
 
-          // Store the result in localStorage
-          localStorage.setItem(
-            "tripPlan",
-            JSON.stringify({
-              plan: finalPlan,
-              thoughts: thoughts
-            })
-          )
+            // Store the result in localStorage
+            localStorage.setItem(
+              "tripPlan",
+              JSON.stringify({
+                plan: finalPlan,
+                thoughts: thoughts
+              })
+            )
 
-          // Close the connection
-          eventSource.close()
+            // Close the connection
+            eventSource.close()
 
-          // Navigate to result page
-          navigate("/result")
+            // Navigate to result page
+            navigate("/result")
+          } catch (e) {
+            console.error("Error parsing complete event:", e)
+            setError("Error processing the completed plan. Please try again.")
+            eventSource.close()
+            setIsLoading(false)
+          }
         })
 
         eventSource.addEventListener("error", (event: MessageEvent) => {
+          console.error("SSE 'error' event received:", event)
           let errorMessage = "Connection error"
           try {
             if (event.data) {
@@ -163,6 +215,7 @@ const PlannerPage: React.FC = () => {
             }
           } catch (e) {
             // If parsing fails, use the default error message
+            console.error("Error parsing SSE error event data:", e)
           }
 
           setError(errorMessage)
@@ -171,7 +224,8 @@ const PlannerPage: React.FC = () => {
         })
 
         // Handle connection errors
-        eventSource.onerror = () => {
+        eventSource.onerror = (err) => {
+          console.error("SSE connection error:", err)
           setError("Connection to server lost. Please try again.")
           eventSource.close()
           setIsLoading(false)
@@ -207,6 +261,7 @@ const PlannerPage: React.FC = () => {
         navigate("/result")
       }
     } catch (err: any) {
+      console.error("Error in handleSubmit:", err)
       setError(err.message || "An unexpected error occurred")
       setIsLoading(false)
     }
