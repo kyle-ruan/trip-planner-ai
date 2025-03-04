@@ -23,8 +23,8 @@ const PORT = process.env.PORT || 3001
 // Middleware
 app.use(
   cors({
-    origin: ["http://localhost:3000", "http://localhost:3001"],
-    methods: ["GET", "POST"],
+    origin: "*", // Allow all origins for testing
+    methods: ["GET", "POST", "OPTIONS"],
     credentials: true
   })
 )
@@ -54,25 +54,32 @@ const sendSSEData = (
   event: string = "message"
 ) => {
   console.log(`Sending SSE event: ${event}`, data)
-  res.write(`event: ${event}\n`)
-  res.write(`data: ${JSON.stringify(data)}\n\n`)
-  // Ensure data is sent immediately - no need to call flush() as Express handles this
+  try {
+    // Make sure the response is writable
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify(data)}\n\n`)
+    } else {
+      console.warn("Attempted to write to a closed response")
+    }
+  } catch (error) {
+    console.error(`Error sending SSE event ${event}:`, error)
+  }
 }
 
 // API endpoint for trip planning with SSE
 app.get("/api/stream-trip-plan", (req, res) => {
   console.log("SSE connection request received")
+  console.log("Request headers:", req.headers)
 
   // Set headers for SSE
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    "Access-Control-Allow-Origin": "*"
-  })
-
-  // Send an initial connection established event
-  sendSSEData(res, { message: "Connection established" }, "connected")
+  res.setHeader("Content-Type", "text/event-stream")
+  res.setHeader("Cache-Control", "no-cache")
+  res.setHeader("Connection", "keep-alive")
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept"
+  )
 
   // Parse query parameters
   const destinations = ((req.query.destinations as string) || "")
@@ -104,7 +111,7 @@ app.get("/api/stream-trip-plan", (req, res) => {
     isNaN(travelers)
   ) {
     console.error("Invalid parameters for SSE request")
-    sendSSEData(res, { error: "Missing or invalid parameters" }, "error")
+    sendSSEData(res, { error: "Missing or invalid parameters" })
     res.end()
     return
   }
@@ -114,7 +121,14 @@ app.get("/api/stream-trip-plan", (req, res) => {
     " → "
   )}`
   logWithColor(startMessage, "green", true)
-  sendSSEData(res, { message: startMessage }, "start")
+
+  // Send the start message as an SSE event - direct writing
+  res.write(
+    `data: ${JSON.stringify({
+      type: "status",
+      message: startMessage
+    })}\n\n`
+  )
 
   logWithColor(`  From: ${startDate} to ${endDate}`, "green", true)
   logWithColor(`  Departing from: ${departureCity}`, "green", true)
@@ -124,14 +138,37 @@ app.get("/api/stream-trip-plan", (req, res) => {
     true
   )
 
-  // Keep the connection alive with a heartbeat
+  // Set up a heartbeat to keep the connection alive
   const heartbeatInterval = setInterval(() => {
-    sendSSEData(res, { message: "heartbeat" }, "heartbeat")
-  }, 15000) // Send heartbeat every 15 seconds
+    if (!res.writableEnded) {
+      console.log("Sending heartbeat...")
+      res.write(
+        `data: ${JSON.stringify({
+          type: "heartbeat",
+          message: "Heartbeat"
+        })}\n\n`
+      )
+    } else {
+      clearInterval(heartbeatInterval)
+      console.log("Response ended, clearing heartbeat interval")
+    }
+  }, 15000) // Send a heartbeat every 15 seconds
 
   // Initialize the agent and run the planning process
   const runTripPlanner = async () => {
     try {
+      // Send thinking status
+      const thinkingMessage = `🤖 Asking AI to plan the trip...`
+      logWithColor(thinkingMessage, "blue", true)
+
+      // Send the thinking message as an SSE event - direct writing
+      res.write(
+        `data: ${JSON.stringify({
+          type: "status",
+          message: thinkingMessage
+        })}\n\n`
+      )
+
       // Initialize the agent
       const executor = await initializeAgentExecutorWithOptions(
         [flightTool, weatherTool, hotelTool, activityTool, budgetTool],
@@ -146,10 +183,6 @@ app.get("/api/stream-trip-plan", (req, res) => {
       const agentThoughts: string[] = []
 
       // Run the agent
-      const thinkingMessage = `🤖 Asking AI to plan the trip...`
-      logWithColor(thinkingMessage, "blue", true)
-      sendSSEData(res, { message: thinkingMessage }, "thinking")
-
       const result = await executor.call({
         input: `Plan a multi-city trip to ${destinations.join(
           ", "
@@ -172,11 +205,56 @@ app.get("/api/stream-trip-plan", (req, res) => {
               logWithColor(thought, "yellow", true)
               agentThoughts.push(thought)
 
-              // Send the thought as an SSE event
+              // Log the tool call
+              console.log(
+                `🔧 TOOL CALL: ${action.tool} with input:`,
+                action.toolInput
+              )
+
+              // Send the tool call as an SSE event - IMPORTANT: Don't use sendSSEData helper
               try {
-                sendSSEData(res, { thought }, "thought")
+                // Write directly to the response
+                res.write(
+                  `data: ${JSON.stringify({
+                    type: "tool_call",
+                    thought,
+                    toolName: action.tool,
+                    toolInput: action.toolInput
+                  })}\n\n`
+                )
               } catch (error) {
-                console.error("Error sending thought via SSE:", error)
+                console.error("Error sending tool call via SSE:", error)
+              }
+
+              return undefined
+            },
+            handleToolEnd: async (
+              output: string,
+              runId: string,
+              toolName: string
+            ) => {
+              const resultMessage = `  ✅ ${toolName} completed with result: ${output.substring(
+                0,
+                100
+              )}${output.length > 100 ? "..." : ""}`
+              logWithColor(resultMessage, "green", true)
+
+              // Log the tool result
+              console.log(`✅ TOOL RESULT: ${toolName} completed`)
+
+              // Send the tool result as an SSE event - IMPORTANT: Don't use sendSSEData helper
+              try {
+                // Write directly to the response
+                res.write(
+                  `data: ${JSON.stringify({
+                    type: "tool_result",
+                    thought: resultMessage,
+                    toolName,
+                    toolOutput: output
+                  })}\n\n`
+                )
+              } catch (error) {
+                console.error("Error sending tool result via SSE:", error)
               }
 
               return undefined
@@ -189,35 +267,42 @@ app.get("/api/stream-trip-plan", (req, res) => {
       const finalMessage = `✨ Final Trip Plan: ${result.output}`
       logWithColor(finalMessage, "green", true)
 
-      // Send the final result
-      sendSSEData(
-        res,
-        {
-          plan: result.output,
-          thoughts: agentThoughts
-        },
-        "complete"
-      )
+      // Send the final result - direct writing
+      if (!res.writableEnded) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: "complete",
+            plan: result.output,
+            thoughts: agentThoughts
+          })}\n\n`
+        )
+
+        // End the SSE connection
+        res.end()
+        console.log("SSE connection closed after completion")
+      }
 
       // Clear the heartbeat interval
       clearInterval(heartbeatInterval)
-
-      // End the SSE connection
-      res.end()
-      console.log("SSE connection closed after completion")
     } catch (error: any) {
       console.error("Error planning trip:", error)
 
       // Clear the heartbeat interval
       clearInterval(heartbeatInterval)
 
-      sendSSEData(
-        res,
-        { error: error.message || "An error occurred while planning the trip" },
-        "error"
-      )
-      res.end()
-      console.log("SSE connection closed due to error")
+      // Send error message - direct writing
+      if (!res.writableEnded) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: "error",
+            error: error.message || "An error occurred while planning the trip"
+          })}\n\n`
+        )
+
+        // End the SSE connection
+        res.end()
+        console.log("SSE connection closed due to error")
+      }
     }
   }
 
