@@ -13,19 +13,19 @@ const Footer: React.FC = () => {
           </div>
           <div className="flex space-x-4">
             <a
-              href="#"
+              href="/privacy"
               className="text-gray-400 hover:text-white transition-colors"
             >
               Privacy Policy
             </a>
             <a
-              href="#"
+              href="/terms"
               className="text-gray-400 hover:text-white transition-colors"
             >
               Terms of Service
             </a>
             <a
-              href="#"
+              href="/contact"
               className="text-gray-400 hover:text-white transition-colors"
             >
               Contact
