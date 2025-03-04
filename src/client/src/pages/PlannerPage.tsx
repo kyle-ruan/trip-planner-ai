@@ -10,10 +10,17 @@ interface TripFormData {
   travelers: string
 }
 
+// Define a custom interface for SSE events
+interface MessageEvent extends Event {
+  data: string
+}
+
 const PlannerPage: React.FC = () => {
   const navigate = useNavigate()
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [streamingThoughts, setStreamingThoughts] = useState<string[]>([])
+  const [streamingStatus, setStreamingStatus] = useState<string>("")
   const [formData, setFormData] = useState<TripFormData>({
     destinations: "",
     startDate: "",
@@ -39,6 +46,8 @@ const PlannerPage: React.FC = () => {
     e.preventDefault()
     setIsLoading(true)
     setError(null)
+    setStreamingThoughts([])
+    setStreamingStatus("Starting...")
 
     try {
       // Validate form data
@@ -83,37 +92,122 @@ const PlannerPage: React.FC = () => {
         throw new Error("Please enter a valid number of travelers")
       }
 
-      // Make API request to plan trip
-      const response = await fetch("/api/plan-trip", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          destinations: destinationsArray,
+      // Use the streaming API endpoint
+      const useStreamingAPI = true
+
+      if (useStreamingAPI) {
+        // Build query string for SSE endpoint
+        const queryParams = new URLSearchParams({
+          destinations: destinationsArray.join(","),
           startDate: formData.startDate,
           endDate: formData.endDate,
           departureCity: formData.departureCity,
-          budget: budget,
-          travelers: travelers
+          budget: budget.toString(),
+          travelers: travelers.toString()
+        }).toString()
+
+        // Create EventSource for SSE
+        const eventSource = new EventSource(
+          `/api/stream-trip-plan?${queryParams}`
+        )
+
+        // Store thoughts and final plan
+        const thoughts: string[] = []
+        let finalPlan: string = ""
+
+        // Handle different event types
+        eventSource.addEventListener("start", (event: MessageEvent) => {
+          const data = JSON.parse(event.data)
+          setStreamingStatus(data.message || "Planning started...")
         })
-      })
 
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || "Failed to plan trip")
+        eventSource.addEventListener("thinking", (event: MessageEvent) => {
+          const data = JSON.parse(event.data)
+          setStreamingStatus(data.message || "AI is thinking...")
+        })
+
+        eventSource.addEventListener("thought", (event: MessageEvent) => {
+          const data = JSON.parse(event.data)
+          if (data.thought) {
+            thoughts.push(data.thought)
+            setStreamingThoughts([...thoughts])
+          }
+        })
+
+        eventSource.addEventListener("complete", (event: MessageEvent) => {
+          const data = JSON.parse(event.data)
+          finalPlan = data.plan
+
+          // Store the result in localStorage
+          localStorage.setItem(
+            "tripPlan",
+            JSON.stringify({
+              plan: finalPlan,
+              thoughts: thoughts
+            })
+          )
+
+          // Close the connection
+          eventSource.close()
+
+          // Navigate to result page
+          navigate("/result")
+        })
+
+        eventSource.addEventListener("error", (event: MessageEvent) => {
+          let errorMessage = "Connection error"
+          try {
+            if (event.data) {
+              const data = JSON.parse(event.data)
+              errorMessage = data.error || errorMessage
+            }
+          } catch (e) {
+            // If parsing fails, use the default error message
+          }
+
+          setError(errorMessage)
+          eventSource.close()
+          setIsLoading(false)
+        })
+
+        // Handle connection errors
+        eventSource.onerror = () => {
+          setError("Connection to server lost. Please try again.")
+          eventSource.close()
+          setIsLoading(false)
+        }
+      } else {
+        // Fallback to regular API if streaming is not available
+        const response = await fetch("/api/plan-trip", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            destinations: destinationsArray,
+            startDate: formData.startDate,
+            endDate: formData.endDate,
+            departureCity: formData.departureCity,
+            budget: budget,
+            travelers: travelers
+          })
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.error || "Failed to plan trip")
+        }
+
+        const data = await response.json()
+
+        // Store the result in localStorage
+        localStorage.setItem("tripPlan", JSON.stringify(data))
+
+        // Navigate to result page
+        navigate("/result")
       }
-
-      const data = await response.json()
-
-      // Store the result in localStorage
-      localStorage.setItem("tripPlan", JSON.stringify(data))
-
-      // Navigate to result page
-      navigate("/result")
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred")
-    } finally {
       setIsLoading(false)
     }
   }
@@ -257,26 +351,43 @@ const PlannerPage: React.FC = () => {
           <button
             type="submit"
             disabled={isLoading}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition-colors shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition-colors ${
+              isLoading ? "opacity-70 cursor-not-allowed" : ""
+            }`}
           >
-            {isLoading ? (
-              <div className="flex items-center">
-                <div className="w-5 h-5 border-t-2 border-b-2 border-white rounded-full animate-spin mr-2"></div>
-                Planning Trip...
-              </div>
-            ) : (
-              "Plan My Trip"
-            )}
+            {isLoading ? "Planning Trip..." : "Plan My Trip"}
           </button>
         </div>
       </form>
 
-      <div className="mt-8 text-center text-gray-600">
-        <p>
-          Our AI will analyze thousands of options to create the perfect trip
-          plan for you. This may take a minute or two.
-        </p>
-      </div>
+      {isLoading && (
+        <div className="mt-8 bg-gray-100 rounded-lg p-6">
+          <h2 className="text-xl font-bold mb-4">
+            AI Trip Planning in Progress
+          </h2>
+          <div className="mb-4">
+            <div className="flex items-center mb-2">
+              <div className="loading-spinner mr-3"></div>
+              <p className="text-lg font-medium">{streamingStatus}</p>
+            </div>
+          </div>
+
+          {streamingThoughts.length > 0 && (
+            <div className="mt-6">
+              <h3 className="text-lg font-semibold mb-3">
+                AI Thinking Process:
+              </h3>
+              <div className="space-y-2 max-h-60 overflow-y-auto p-2">
+                {streamingThoughts.map((thought, index) => (
+                  <div key={index} className="p-3 bg-white rounded shadow-sm">
+                    {thought}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
